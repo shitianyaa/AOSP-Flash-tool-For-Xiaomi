@@ -92,10 +92,13 @@ $Script:Labels_zh = @{
     Installed = "已安装 ({0})"
     NotInstalled = "未安装"
     PayloadDumper = "Payload Dumper: "
-    SelectRom = "选择 ROM 文件:"
-    EnterPath = "手动输入路径"
-    ImagesDir = "选择已解压镜像文件夹"
-    EnterImagesDir = "输入文件夹路径"
+    SelectRom = "粘贴 ROM (Zip) 路径:"
+    EnterPath = "粘贴路径"
+    EnterZipPath = "粘贴 ZIP 路径:"
+    EnterGappsPath = "粘贴 GApps ZIP 路径:"
+    Step2SelectImages = "步骤 2: 提取分区镜像"
+    Step3SelectRomZip = "步骤 3: sideload ROM"
+    WantGapps = "需要安装 GApps？"
     NoRomFound = "未找到 ROM 文件"
     FileNotFound = "文件不存在"
     DirNotFound = "目录不存在"
@@ -140,7 +143,6 @@ $Script:Labels_zh = @{
     InstallGapps = "安装 GApps？"
     GappsNote = "注意: 如果需要 GApps，请不要先重启到系统！"
     GappsInstruction = "如需安装 GApps，在 recovery 中选择 'Apply update' -> 'Apply from ADB'"
-    WantGapps = "是否需要安装 Google 应用 (GApps)？"
     AfterRomGapps = "请选择 GApps ZIP 文件进行 sideload"
     AfterRomSideload = "刷入 ROM 后，可根据需要安装 GApps"
     ReadyToReboot = "准备重启到系统？"
@@ -248,10 +250,18 @@ $Script:Labels_en = @{
     Installed = "Installed ({0})"
     NotInstalled = "Not installed"
     PayloadDumper = "Payload Dumper: "
-    SelectRom = "Select ROM file:"
-    EnterPath = "Enter full path manually"
-    ImagesDir = "Select folder with extracted images"
+    SelectRom = "Paste ROM (Zip) path:"
+    EnterPath = "Paste path"
+    EnterZipPath = "Paste ZIP path:"
+    EnterGappsPath = "Paste GApps ZIP path:"
+    ImagesDir = "Use output folder (extracted images)"
+    SelectOtherFolder = "Select other folder"
+    SelectZipFolder = "Select ZIP from folder"
+    SelectZipFile = "Select ZIP file"
     EnterImagesDir = "Enter folder path"
+    Step2SelectImages = "Step 2: Extract partition images"
+    Step3SelectRomZip = "Step 3: sideload ROM"
+    WantGapps = "Install GApps?"
     NoRomFound = "No ROM file found"
     FileNotFound = "File not found"
     DirNotFound = "Directory not found"
@@ -296,7 +306,6 @@ $Script:Labels_en = @{
     InstallGapps = "Install GApps?"
     GappsNote = "Note: If you need GApps, do NOT reboot to system yet!"
     GappsInstruction = "If you want GApps, select 'Apply update' -> 'Apply from ADB' in recovery"
-    WantGapps = "Do you need to install Google Apps (GApps)?"
     AfterRomGapps = "Now select GApps ZIP file for sideload"
     AfterRomSideload = "After flashing ROM, you can install GApps if needed"
     ReadyToReboot = "Ready to reboot to system?"
@@ -576,41 +585,45 @@ function Extract-PayloadBin {
     if (-not (Install-PayloadDumper)) { return $false }
     $dp = Join-Path $Script:Config.ToolsDir $Script:Config.PayloadDumperExe
     Write-Step (T "ExtractingPayload")
+    Write-Host "  Payload: $PayloadPath" -ForegroundColor DarkGray
+    Write-Host "  Output: $OutputDir" -ForegroundColor DarkGray
     try {
-        Remove-Item -Path "$OutputDir\*" -Recurse -Force -ErrorAction SilentlyContinue
-        $args = @("-o", $OutputDir)
+        Get-ChildItem -Path $OutputDir -Filter "*.img" -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+        $argStr = "-o `"$OutputDir`""
         if ($Partitions.Count -gt 0) {
-            $args += "-p"
-            $args += ($Partitions -join ",")
+            $argStr += " -p $($Partitions -join ',')"
         }
-        $args += $PayloadPath
-        $outFile = [System.IO.Path]::GetTempFileName()
-        $errFile = [System.IO.Path]::GetTempFileName()
-        $p = Start-Process -FilePath $dp -ArgumentList $args -NoNewWindow -PassThru -RedirectStandardOutput $outFile -RedirectStandardError $errFile
+        $argStr += " `"$PayloadPath`""
+        Write-Host "  > payload-dumper-go $argStr" -ForegroundColor DarkGray
+        $outFile = "$env:TEMP\pd_out_$PID.txt"
+        $errFile = "$env:TEMP\pd_err_$PID.txt"
+        $p = Start-Process -FilePath $dp -ArgumentList $argStr -NoNewWindow -PassThru -RedirectStandardOutput $outFile -RedirectStandardError $errFile
         $p.WaitForExit()
         Start-Sleep -Milliseconds 500
         if (-not $p.HasExited) { $p.Kill() }
         $exitCode = 0
         try { $exitCode = $p.ExitCode } catch {}
-        $output = [System.IO.File]::ReadAllText($outFile)
-        $erroutput = [System.IO.File]::ReadAllText($errFile)
+        $output = Get-Content $outFile -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+        $erroutput = Get-Content $errFile -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
         Remove-Item $outFile, $errFile -ErrorAction SilentlyContinue
         $combined = ""
         if ($output) { $combined += $output }
         if ($erroutput) { $combined += $erroutput }
         if ($combined) {
-            $cleanOutput = $combined -replace '\x1b\[[0-9;]*[A-Za-z]', ''
-            $cleanOutput = $cleanOutput -replace '[.\s]+$', ''
-            $cleanOutput = $cleanOutput -replace '^\s+', ''
-            $cleanOutput = $cleanOutput.Trim()
+            Write-Host $combined
         }
-        $foundCount = 0
-        foreach ($pname in $Partitions) {
-            if (Test-Path (Join-Path $OutputDir "$pname.img")) { $foundCount++ }
+        $imgFiles = Get-ChildItem -Path $OutputDir -Filter "*.img" -File -ErrorAction SilentlyContinue
+        if ($imgFiles -and $imgFiles.Count -gt 0) {
+            Write-Host "  Extracted $($imgFiles.Count) images:" -ForegroundColor Green
+            foreach ($img in $imgFiles) {
+                $sizeMB = [math]::Round($img.Length / 1MB, 2)
+                Write-Host "    - $($img.Name) ($sizeMB MB)" -ForegroundColor DarkGray
+            }
+            Write-OK (T "ExtractionComplete")
+            return $true
         }
-        if ($foundCount -eq $Partitions.Count -and $Partitions.Count -gt 0) { Write-OK (T "ExtractionComplete"); return $true }
-        if ($Partitions.Count -eq 0) { Write-OK (T "ExtractionComplete"); return $true }
-        Write-Err "Extraction failed"
+        Write-Err "Extraction failed - no images found"
+        Write-Host "  Exit code: $exitCode" -ForegroundColor DarkGray
         return $false
     } catch { Write-Err (T "Error" $_); return $false }
 }
@@ -626,28 +639,10 @@ function Find-RomFile {
 
 function Select-RomFile {
     Write-Host ""; Write-Host (T "SelectRom") -ForegroundColor Yellow
-    Write-Host "  [1] Use output folder (extracted images)"
-    Write-Host "  [2] Enter full path manually"
-    Write-Host "  [3] Select other folder with extracted images"
-    Write-Host "  [0] Exit"
-    $c = Get-Input "Select [0-3]"
-    switch ($c) {
-        "0" { return $null }
-        "1" { 
-            $outDir = $Script:Config.OutputDir
-            if (Test-Path $outDir) { 
-                $imgFiles = Get-ChildItem -Path $outDir -Filter "*.img" -File
-                if ($imgFiles.Count -gt 0) { return "DIR:$outDir" }
-                Write-Err "No .img files found in output folder"
-                return $null
-            }
-            Write-Err "Output folder not found"
-            return $null
-        }
-        "2" { $p = Get-Input (T "EnterPath"); if (Test-Path $p) { return $p } Write-Err (T "FileNotFound"); return $null }
-        "3" { $p = Get-Input (T "EnterImagesDir"); if (Test-Path $p) { return "DIR:$p" } Write-Err (T "DirNotFound"); return $null }
-        default { Write-Err (T "InvalidChoice"); return $null }
-    }
+    $p = Get-Input (T "EnterPath")
+    if ($p -match "\.zip`$" -and (Test-Path $p)) { return $p }
+    Write-Err (T "FileNotFound")
+    return $null
 }
 
 function Start-FlashProcess {
@@ -953,7 +948,7 @@ function Start-CompleteFlash {
     Write-OK "设备已处于 Fastboot 模式"
     
     Write-Host ""
-    Write-Host "Step 2: Select partition images folder" -ForegroundColor Cyan
+    Write-Host (T "Step2SelectImages") -ForegroundColor Cyan
     $rf = Select-RomFile
     if (-not $rf) { return }
     
@@ -963,37 +958,37 @@ function Start-CompleteFlash {
         Write-Step (T "Extract")
         $td = Join-Path $Script:Config.OutputDir "temp_extract"
         if (Test-Path $td) { Remove-Item $td -Recurse -Force }
+        New-Item -ItemType Directory -Path $td -Force | Out-Null
+        Write-Host "  Extracting ZIP to: $td" -ForegroundColor DarkGray
         Expand-Archive -Path $rf -DestinationPath $td -Force
+        $extractedFiles = Get-ChildItem -Path $td -Recurse -File | Select-Object -First 20
+        Write-Host "  Extracted files:" -ForegroundColor DarkGray
+        foreach ($f in $extractedFiles) { Write-Host "    $($f.Name)" -ForegroundColor DarkGray }
         $pp = Join-Path $td "payload.bin"
-        if (Test-Path $pp) { $imgDir = $Script:Config.OutputDir; if (-not (Extract-PayloadBin $pp $imgDir $Script:Config.FlashOrder)) { return } }
+        if (Test-Path $pp) { 
+            Write-Host "  Found payload.bin: $pp" -ForegroundColor Green
+            $imgDir = $Script:Config.OutputDir; 
+            if (-not (Extract-PayloadBin $pp $imgDir $Script:Config.FlashOrder)) { return } 
+        }
         else { Write-Warn "No payload.bin, using extracted files"; $imgDir = $td }
     } elseif ($rf -match "payload\.bin`$") { $imgDir = $Script:Config.OutputDir; if (-not (Extract-PayloadBin $rf $imgDir $Script:Config.FlashOrder)) { return } }
     else { Write-Err (T "UnsupportedFormat"); return }
     
-    Write-Host ""; Write-Host "Available images:" -ForegroundColor Cyan
+    Write-Host ""; Write-Host (T "AvailableImages") -ForegroundColor Cyan
     Get-ChildItem -Path $imgDir -Filter "*.img" -File | ForEach-Object { Write-Host "  - $($_.Name)" }
     Write-Host ""
     
-    Write-Host "Step 3: Select full ROM ZIP for sideload" -ForegroundColor Cyan
-    Write-Host "  [1] Enter full path manually"
-    Write-Host "  [2] Select other folder with extracted images"
-    Write-Host "  [0] Skip sideload"
-    $c = Get-Input "Select [0-2]"
-    if ($c -eq "1") {
-        $zf = Get-Input "Enter ZIP file path"
-        if ($zf -match "\.zip`$" -and (Test-Path $zf)) { $zipFile = $zf }
-    } elseif ($c -eq "2") {
-        $zf = Get-Input (T "EnterImagesDir")
-        $zips = Get-ChildItem -Path $zf -Filter "*.zip" -File
-        if ($zips.Count -gt 0) {
-            Write-Host "Available ZIP files:" -ForegroundColor Cyan
-            for ($i = 0; $i -lt $zips.Count; $i++) { Write-Host "  [$($i+1)] $($zips[$i].Name)" }
-            Write-Host "  [0] Exit"
-            $sel = Get-Input "Select ZIP number [0-$($zips.Count)]"
-            if ($sel -eq "0") { return }
-            $idx = [int]$sel - 1
-            if ($idx -ge 0 -and $idx -lt $zips.Count) { $zipFile = $zips[$idx].FullName } else { return }
-        } else { return }
+    Write-Host ""
+    Write-Host (T "Step3SelectRomZip") -ForegroundColor Cyan
+    if ($rf -and $rf -match "\.zip`$") {
+        Write-Host "  Using: $rf" -ForegroundColor Green
+        $zipFile = $rf
+    } else {
+        if (Get-YesNo (T "SkipSideload")) { }
+        else {
+            $zf = Get-Input (T "EnterZipPath")
+            if ($zf -match "\.zip`$" -and (Test-Path $zf)) { $zipFile = $zf }
+        }
     }
     
     Write-Host ""
@@ -1004,26 +999,8 @@ function Start-CompleteFlash {
     Write-Host ""
     $needGapps = Get-YesNo (T "WantGapps")
     if ($needGapps) {
-        Write-Host "Step 4: Select GApps ZIP file" -ForegroundColor Cyan
-        Write-Host "  [1] Enter full path manually"
-        Write-Host "  [2] Select other folder"
-        Write-Host "  [0] Skip GApps"
-        $c = Get-Input "Select [0-2]"
-        if ($c -eq "1") {
-            $gf = Get-Input "Enter GApps ZIP file path"
-            if ($gf -match "\.zip`$" -and (Test-Path $gf)) { $gappsFile = $gf }
-        } elseif ($c -eq "2") {
-            $gf = Get-Input (T "EnterImagesDir")
-            $gapps = Get-ChildItem -Path $gf -Filter "*.zip" -File
-            if ($gapps.Count -gt 0) {
-                Write-Host "Available ZIP files:" -ForegroundColor Cyan
-                for ($i = 0; $i -lt $gapps.Count; $i++) { Write-Host "  [$($i+1)] $($gapps[$i].Name)" }
-                Write-Host "  [0] Exit"
-                $sel = Get-Input "Select ZIP number [0-$($gapps.Count)]"
-                if ($sel -eq "0") { $gappsFile = "" }
-                else { $idx = [int]$sel - 1; if ($idx -ge 0 -and $idx -lt $gapps.Count) { $gappsFile = $gapps[$idx].FullName } }
-            }
-        }
+        $gf = Get-Input (T "EnterGappsPath")
+        if ($gf -match "\.zip`$" -and (Test-Path $gf)) { $gappsFile = $gf }
     }
     
     Write-Host ""
